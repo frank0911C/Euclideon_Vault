@@ -1,0 +1,169 @@
+stages:
+ - build
+ - package
+
+windows_x64_release_opengl:
+  stage: build
+  script: "buildscripts\\build.sh Release x64 --gfxapi=opengl"
+  tags:
+    - windows
+    - vs2015
+
+windows_x64_debug_opengl:
+  stage: build
+  script: "buildscripts\\build.sh Debug x64 --gfxapi=opengl"
+  tags:
+    - windows
+    - vs2015
+
+windows_x64_release_d3d11:
+  stage: build
+  script: "buildscripts\\build.sh Release x64 --gfxapi=d3d11"
+  tags:
+    - windows
+    - vs2015
+
+windows_x64_debug_d3d11:
+  stage: build
+  script: "buildscripts\\build.sh Debug x64 --gfxapi=d3d11"
+  tags:
+    - windows
+    - vs2015
+
+linux_deb_gcc_release:
+  image: gitlab.euclideon.com:4567/docker-images/dev-xenial:v5
+  stage: build
+  script: "buildscripts/build.sh Release x64"
+  tags:
+    - linux
+    - docker
+
+linux_deb_gcc_debug:
+  image: gitlab.euclideon.com:4567/docker-images/dev-xenial:v5
+  stage: build
+  script: "buildscripts/build.sh Debug x64"
+  tags:
+    - linux
+    - docker
+
+linux_deb_clang_release:
+  image: gitlab.euclideon.com:4567/docker-images/dev-xenial:v5
+  stage: build
+  script: "buildscripts/build.sh ReleaseClang x64"
+  tags:
+    - linux
+    - docker
+
+linux_deb_clang_debug:
+  image: gitlab.euclideon.com:4567/docker-images/dev-xenial:v5
+  stage: build
+  script: "buildscripts/build.sh DebugClang x64"
+  tags:
+    - linux
+    - docker
+
+#linux_rpm_gcc_release:
+#  image: gitlab.euclideon.com:4567/docker-images/dev-centos7:v3
+#  stage: build
+#  script: "buildscripts/build.sh Release x64"
+#  tags:
+#    - linux
+#    - docker
+#
+#linux_rpm_gcc_debug:
+#  image: gitlab.euclideon.com:4567/docker-images/dev-centos7:v3
+#  stage: build
+#  script: "buildscripts/build.sh Debug x64"
+#  tags:
+#    - linux
+#    - docker
+#
+#linux_rpm_clang_release:
+#  image: gitlab.euclideon.com:4567/docker-images/dev-centos7:v3
+#  stage: build
+#  script: "buildscripts/build.sh ReleaseClang x64"
+#  tags:
+#    - linux
+#    - docker
+#
+#linux_rpm_clang_debug:
+#  image: gitlab.euclideon.com:4567/docker-images/dev-centos7:v3
+#  stage: build
+#  script: "buildscripts/build.sh DebugClang x64"
+#  tags:
+#    - linux
+#    - docker
+
+macosx_x64_release_opengl:
+  stage: build
+  script: "buildscripts/build.sh Release x64 --gfxapi=opengl"
+  tags:
+    - osx
+
+macosx_x64_debug_opengl:
+  stage: build
+  script: "buildscripts/build.sh Debug x64 --gfxapi=opengl"
+  tags:
+    - osx
+
+macosx_x64_release_metal:
+  stage: build
+  script: "buildscripts/build.sh Release x64 --gfxapi=metal"
+  tags:
+    - osx
+
+macosx_x64_debug_metal:
+  stage: build
+  script: "buildscripts/build.sh Debug x64 --gfxapi=metal"
+  tags:
+    - osx
+
+#ios_x64_release:
+#  stage: build
+#  script: "buildscripts/build.sh Release x86_64 ios"
+#  tags:
+#    - osx
+#
+#ios_x64_debug:
+#  stage: build
+#  script: "buildscripts/build.sh Debug x86_64 ios"
+#  tags:
+#    - osx
+#
+#ios_arm64_release:
+#  stage: build
+#  script: "buildscripts/build.sh Release arm64 ios"
+#  tags:
+#    - osx
+#
+#ios_arm64_debug:
+#  stage: build
+#  script: "buildscripts/build.sh Debug arm64 ios"
+#  tags:
+#    - osx
+
+emscripten_wasm32_release:
+  image: gitlab.euclideon.com:4567/docker-images/emscripten-bionic:v3
+  stage: build
+  script: "buildscripts/build.sh Release wasm32 Emscripten"
+  tags:
+    - linux
+    - docker
+
+emscripten_wasm32_debug:
+  image: gitlab.euclideon.com:4567/docker-images/emscripten-bionic:v3
+  stage: build
+  script: "buildscripts/build.sh Debug wasm32 Emscripten"
+  tags:
+    - linux
+    - docker
+
+package_windows:
+  stage: package
+  script: "buildscripts\\package.sh"
+  only:
+    - master
+    - tags
+  tags:
+    - windows
+    - vs2015

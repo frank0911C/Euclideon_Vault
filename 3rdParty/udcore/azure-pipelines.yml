@@ -1,0 +1,78 @@
+name: $(Date:yyyyMMdd)$(Rev:rr)
+
+stages:
+- stage: build
+  displayName: 'Build'
+  jobs:
+  - template: azure-pipelines-jobs-linux.yml
+    parameters:
+      name: ubuntu1604
+      displayName: 'Ubuntu 16.04'
+      container: euclideon/vault:dev-xenial-v1
+  - template: azure-pipelines-jobs-linux.yml
+    parameters:
+      name: ubuntu1804
+      displayName: 'Ubuntu 18.04'
+      container: euclideon/vault:dev-bionic-v1
+  - template: azure-pipelines-jobs-macos.yml
+    parameters:
+      name: macos
+      displayName: 'macOS'
+      sdk: 'macosx'
+  - template: azure-pipelines-jobs-macos.yml
+    parameters:
+      name: ios
+      displayName: 'iOS'
+      sdk: 'iphoneos'
+  - template: azure-pipelines-jobs-macos.yml
+    parameters:
+      name: iossimulator
+      displayName: 'iOS Simulator'
+      sdk: 'iphonesimulator'
+  - template: azure-pipelines-jobs-windows.yml
+    parameters:
+      name: windows
+      displayName: 'Windows'
+  - template: azure-pipelines-jobs-windows.yml
+    parameters:
+      name: androidx64
+      displayName: 'Android x64'
+      platform: 'x64'
+      premakeOpts: '--os=android'
+  - template: azure-pipelines-jobs-windows.yml
+    parameters:
+      name: androidarm64
+      displayName: 'Android ARM64'
+      platform: 'arm64'
+      premakeOpts: '--os=android'
+  - template: azure-pipelines-jobs-emscripten.yml
+    parameters:
+      name: emscripten
+      displayName: 'Emscripten'
+      container: euclideon/vault:emscripten-bionic-v1
+- stage: test
+  displayName: 'Test'
+  jobs:
+  - job: coverage
+    displayName: Coverage
+    pool:
+      vmImage: 'ubuntu-latest'
+    container:
+      image: euclideon/vault:dev-bionic-v1
+    steps:
+    - checkout: self
+      submodules: recursive
+    - script: bin/premake-bin/premake5 gmake2 --coverage
+      displayName: 'Run Premake'
+    - script: make -j4 config=debug_x64
+      displayName: 'Build Projects'
+    - script: Output/bin/Debug_x64/udTest
+      displayName: 'Run Tests'
+    - script: gcovr -r . -e 3rdParty -e udTest -s -p --xml -o coverage.xml
+      displayName: 'Generate Coverage'
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish Coverage Results'
+      condition: always()
+      inputs:
+        codeCoverageTool: 'cobertura'
+        summaryFileLocation: 'coverage.xml'

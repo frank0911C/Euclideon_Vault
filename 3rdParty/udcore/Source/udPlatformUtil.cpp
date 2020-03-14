@@ -1,0 +1,1174 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include "udPlatformUtil.h"
+#include "udStringUtil.h"
+#include "udFile.h"
+#include "udMath.h"
+#include "udJSON.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+
+#include <sys/stat.h>
+#include <time.h>
+#include <chrono>
+
+#if UDPLATFORM_WINDOWS
+#include <io.h>
+#include <mmsystem.h>
+#else
+#include <sys/types.h>
+#include <pwd.h>
+#include "dirent.h"
+#include <time.h>
+#include <sys/time.h>
+static const uint64_t nsec_per_sec = 1000000000; // 1 billion nanoseconds in one second
+static const uint64_t nsec_per_msec = 1000000;   // 1 million nanoseconds in one millisecond
+//static const uint64_t usec_per_msec = 1000;      // 1 thousand microseconds in one millisecond
+#endif
+
+static char s_udStrEmptyString[] = "";
+
+// *********************************************************************
+// Author: Dave Pevreal, October 2016
+void udUpdateCamera(double camera[16], double yawRadians, double pitchRadians, double tx, double ty, double tz)
+{
+  udDouble4x4 rotation = udDouble4x4::create(camera);
+  udDouble3 pos = rotation.axis.t.toVector3();
+  rotation.axis.t = udDouble4::identity();
+
+  if (yawRadians != 0.0)
+    rotation = udDouble4x4::rotationZ(yawRadians) * rotation;   // Yaw on global axis
+  if (pitchRadians != 0.0)
+    rotation = rotation * udDouble4x4::rotationX(pitchRadians); // Pitch on local axis
+  udDouble3 trans = udDouble3::zero();
+  trans += rotation.axis.x.toVector3() * tx;
+  trans += rotation.axis.y.toVector3() * ty;
+  trans += rotation.axis.z.toVector3() * tz;
+  rotation.axis.t = udDouble4::create(pos + trans, 1.0);
+
+  memcpy(camera, rotation.a, sizeof(rotation));
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, October 2016
+void udUpdateCamera(float camera[16], float yawRadians, float pitchRadians, float tx, float ty, float tz)
+{
+  udFloat4x4 rotation = udFloat4x4::create(camera);
+  udFloat3 pos = rotation.axis.t.toVector3();
+  rotation.axis.t = udFloat4::identity();
+
+  rotation = udFloat4x4::rotationZ(yawRadians) * rotation;   // Yaw on global axis
+  rotation = rotation * udFloat4x4::rotationX(pitchRadians); // Pitch on local axis
+  pos += rotation.axis.x.toVector3() * tx;
+  pos += rotation.axis.y.toVector3() * ty;
+  pos += rotation.axis.z.toVector3() * tz;
+  rotation.axis.t = udFloat4::create(pos, 1.0);
+
+  memcpy(camera, rotation.a, sizeof(rotation));
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+uint32_t udGetTimeMs()
+{
+#if UDPLATFORM_WINDOWS
+  return timeGetTime();
+#else
+  //struct timeval now;
+  //gettimeofday(&now, NULL);
+  //return (uint32_t)(now.tv_usec/usec_per_msec);
+
+  // Unfortunately the above code is unreliable
+  // TODO: Check whether this code gives consistent timing values regardless of thread
+  struct timespec ts1;
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  return (ts1.tv_sec * 1000) + (ts1.tv_nsec / nsec_per_msec);
+#endif
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, June 2014
+uint64_t udPerfCounterStart()
+{
+#if UDPLATFORM_WINDOWS
+  LARGE_INTEGER p;
+  QueryPerformanceCounter(&p);
+  return p.QuadPart;
+#else
+  uint64_t nsec_count;
+  struct timespec ts1;
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  nsec_count = ts1.tv_nsec + ts1.tv_sec * nsec_per_sec;
+  return nsec_count;
+#endif
+}
+
+
+// *********************************************************************
+// Author: Dave Pevreal, June 2014
+float udPerfCounterMilliseconds(uint64_t startValue, uint64_t end)
+{
+#if UDPLATFORM_WINDOWS
+  LARGE_INTEGER p, f;
+  if (end)
+    p.QuadPart = end;
+  else
+    QueryPerformanceCounter(&p);
+  QueryPerformanceFrequency(&f);
+
+  // TODO: Come back and tidy this up to be integer
+
+  double delta = (double)(p.QuadPart - startValue);
+
+  double ms = (delta) ? (1000.0 / (f.QuadPart / delta)) : 0.0;
+  return (float)ms;
+#else
+  if (!end)
+    end = udPerfCounterStart();
+  double ms = (end - startValue) / (nsec_per_sec / 1000.0);
+  return (float)ms;
+#endif
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, April 2018
+float udPerfCounterSeconds(uint64_t startValue, uint64_t end)
+{
+  return udPerfCounterMilliseconds(startValue, end) / 1000.f;
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, April 2018
+int udDaysUntilExpired(int maxDays, const char **ppExpireDateStr)
+{
+  // Calculate the build year/month compile-time constants
+  #define BUILDDATE __DATE__
+  #define BUILDDATEYEAR (BUILDDATE[7]*1000 + BUILDDATE[8]*100 + BUILDDATE[9]*10 + BUILDDATE[10] - 1111*'0')
+  #define BUILDDATEMONTH  (((BUILDDATE[0] == 'J') && (BUILDDATE[1] == 'a') && (BUILDDATE[2] == 'n')) ?  1 : ( /* Jan */ \
+                           ((BUILDDATE[0] == 'F') && (BUILDDATE[1] == 'e') && (BUILDDATE[2] == 'b')) ?  2 : ( /* Feb */ \
+                           ((BUILDDATE[0] == 'M') && (BUILDDATE[1] == 'a') && (BUILDDATE[2] == 'r')) ?  3 : ( /* Mar */ \
+                           ((BUILDDATE[0] == 'A') && (BUILDDATE[1] == 'p') && (BUILDDATE[2] == 'r')) ?  4 : ( /* Apr */ \
+                           ((BUILDDATE[0] == 'M') && (BUILDDATE[1] == 'a') && (BUILDDATE[2] == 'y')) ?  5 : ( /* May */ \
+                           ((BUILDDATE[0] == 'J') && (BUILDDATE[1] == 'u') && (BUILDDATE[2] == 'n')) ?  6 : ( /* Jun */ \
+                           ((BUILDDATE[0] == 'J') && (BUILDDATE[1] == 'u') && (BUILDDATE[2] == 'l')) ?  7 : ( /* Jul */ \
+                           ((BUILDDATE[0] == 'A') && (BUILDDATE[1] == 'u') && (BUILDDATE[2] == 'g')) ?  8 : ( /* Aug */ \
+                           ((BUILDDATE[0] == 'S') && (BUILDDATE[1] == 'e') && (BUILDDATE[2] == 'p')) ?  9 : ( /* Sep */ \
+                           ((BUILDDATE[0] == 'O') && (BUILDDATE[1] == 'c') && (BUILDDATE[2] == 't')) ? 10 : ( /* Oct */ \
+                           ((BUILDDATE[0] == 'N') && (BUILDDATE[1] == 'o') && (BUILDDATE[2] == 'v')) ? 11 : ( /* Nov */ \
+                           ((BUILDDATE[0] == 'D') && (BUILDDATE[1] == 'e') && (BUILDDATE[2] == 'c')) ? 12 : ( /* Dec */ \
+                            -1 )))))))))))))
+  #define BUILDDATEDAY ((BUILDDATE[4] == ' ' ? '0' : BUILDDATE[4]) * 10 + BUILDDATE[5] - 11*'0')
+
+  time_t nowMoment = time(0), testMoment;
+  struct tm nowTm = *localtime(&nowMoment);
+  struct tm buildTm = nowTm;
+  struct tm testTm;
+  buildTm.tm_year = BUILDDATEYEAR - 1900;
+  buildTm.tm_mon = BUILDDATEMONTH - 1;
+  buildTm.tm_mday = BUILDDATEDAY; // Only field that starts at 1 not zero.
+  #undef BUILDDATE
+  #undef BUILDDATEYEAR
+  #undef BUILDDATEMONTH
+  #undef BUILDDATEDAY
+
+  int daysSince = -1;
+  do
+  {
+    testTm = buildTm;
+    testTm.tm_mday += ++daysSince;
+    testMoment = mktime(&testTm);
+  } while (testMoment < nowMoment && (daysSince < maxDays));
+
+  if (ppExpireDateStr)
+  {
+    static char str[100];
+    testTm = buildTm;
+    testTm.tm_mday += maxDays;
+    time_t expireTime = mktime(&testTm);
+    testTm = *localtime(&expireTime);
+    udSprintf(str, "%04d-%02d-%02d", testTm.tm_year + 1900, testTm.tm_mon + 1, testTm.tm_mday);
+    *ppExpireDateStr = str;
+  }
+
+  return maxDays - daysSince;
+}
+
+// ****************************************************************************
+// Author: Paul Fox, July 2019
+int64_t udGetEpochSecsUTCd()
+{
+  return std::chrono::system_clock::now().time_since_epoch().count() / std::chrono::system_clock::period::den;
+}
+
+// ****************************************************************************
+// Author: Paul Fox, July 2019
+double udGetEpochSecsUTCf()
+{
+  return 1.0 * std::chrono::system_clock::now().time_since_epoch().count() / std::chrono::system_clock::period::den;
+}
+
+// ****************************************************************************
+// Author: Paul Fox, July 2019
+int64_t udGetEpochMilliSecsUTCd()
+{
+  return 1000 * std::chrono::system_clock::now().time_since_epoch().count() / std::chrono::system_clock::period::den;
+}
+
+// ****************************************************************************
+// Author: Paul Fox, July 2019
+double udGetEpochMilliSecsUTCf()
+{
+  return 1000.0 * std::chrono::system_clock::now().time_since_epoch().count() / std::chrono::system_clock::period::den;
+}
+
+#if UDPLATFORM_WINDOWS
+// *********************************************************************
+// Author: Dave Pevreal, June 2015
+udOSString::udOSString(const char *pString)
+{
+  size_t len = udStrlen(pString) + 1;
+  pUTF8 = const_cast<char*>(pString);
+  pWide = udAllocType(wchar_t, len, udAF_None);
+  pAllocation = pWide;
+
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pString, -1, pWide, (int)len) == 0)
+    *pWide = 0;
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, June 2015
+udOSString::udOSString(const wchar_t *pString)
+{
+  size_t len = wcslen(pString) + 1;
+  size_t allocSize = len * 4;
+  pUTF8 = udAllocType(char, allocSize, udAF_None);
+  pWide = const_cast<wchar_t*>(pString);
+  pAllocation = pUTF8;
+
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, pString, -1, pUTF8, (int)allocSize, nullptr, nullptr) == 0)
+    *pUTF8 = 0;
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, June 2015
+udOSString::~udOSString()
+{
+  udFree(pAllocation);
+}
+#endif // UDPLATFORM_WINDOWS
+
+static char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// *********************************************************************
+// Author: Dave Pevreal, December 2014
+udResult udBase64Decode(const char *pString, size_t length, uint8_t *pOutput, size_t outputLength, size_t *pOutputLengthWritten /*= nullptr*/)
+{
+  udResult result;
+  uint32_t accum = 0; // Accumulator for incoming data (read 6 bits at a time)
+  int accumBits = 0;
+  size_t outputIndex = 0;
+
+  if (!length && pString)
+    length = udStrlen(pString);
+
+  if (!pOutput && pOutputLengthWritten)
+  {
+    outputIndex = length / 4 * 3;
+    UD_ERROR_SET(udR_Success);
+  }
+
+  UD_ERROR_NULL(pString, udR_InvalidParameter_);
+  UD_ERROR_NULL(pOutput, udR_InvalidParameter_);
+
+  for (size_t inputIndex = 0; inputIndex < length; )
+  {
+    char *c = strchr(b64, pString[inputIndex++]);
+    if (c)
+    {
+      accum |= uint32_t(c - b64) << (16 - accumBits - 6); // Store in accumulator, starting at high byte
+      if ((accumBits += 6) >= 8)
+      {
+        UD_ERROR_IF(outputIndex >= outputLength, udR_BufferTooSmall);
+        pOutput[outputIndex++] = uint8_t(accum >> 8);
+        accum <<= 8;
+        accumBits -= 8;
+      }
+    }
+  }
+  result = udR_Success;
+
+epilogue:
+  if (pOutputLengthWritten)
+    *pOutputLengthWritten = outputIndex;
+
+  return result;
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, September 2017
+udResult udBase64Decode(uint8_t **ppOutput, size_t *pOutputLength, const char *pString)
+{
+  udResult result;
+  uint8_t *pOutput = nullptr;
+
+  UD_ERROR_NULL(ppOutput, udR_InvalidParameter_);
+  UD_ERROR_NULL(pOutputLength, udR_InvalidParameter_);
+  UD_ERROR_NULL(pString, udR_InvalidParameter_);
+
+  result = udBase64Decode(pString, 0, nullptr, 0, pOutputLength);
+  UD_ERROR_HANDLE();
+  pOutput = udAllocType(uint8_t, *pOutputLength, udAF_None);
+  UD_ERROR_NULL(pOutput, udR_MemoryAllocationFailure);
+  result = udBase64Decode(pString, 0, pOutput, *pOutputLength, pOutputLength);
+  UD_ERROR_HANDLE();
+
+  *ppOutput = pOutput;
+  pOutput = nullptr;
+  result = udR_Success;
+
+epilogue:
+  udFree(pOutput);
+  return result;
+}
+
+// *********************************************************************
+// Author: Paul Fox, March 2016
+udResult udBase64Encode(const void *pBinary, size_t binaryLength, char *pString, size_t strLength, size_t *pOutputLengthWritten /*= nullptr*/)
+{
+  udResult result;
+  uint32_t accum = 0; // Accumulator for data (read 8 bits at a time but only consume 6)
+  int accumBits = 0;
+  size_t outputIndex = 0;
+  size_t expectedOutputLength = (binaryLength + 2) / 3 * 4 + 1; // +1 for nul terminator
+
+  if (!pString && pOutputLengthWritten)
+  {
+    outputIndex = expectedOutputLength;
+    UD_ERROR_SET(udR_Success);
+  }
+
+  UD_ERROR_NULL(pString, udR_InvalidParameter_);
+  UD_ERROR_IF(!pBinary && binaryLength, udR_InvalidParameter_);
+
+  for (size_t inputIndex = 0; inputIndex < binaryLength; ++inputIndex)
+  {
+    accum = (accum << 8) | ((uint8_t*)pBinary)[inputIndex];
+    accumBits += 8;
+    while (accumBits >= 6)
+    {
+      UD_ERROR_IF(outputIndex >= strLength, udR_BufferTooSmall);
+      pString[outputIndex] = b64[((accum >> (accumBits - 6)) & 0x3F)];
+      ++outputIndex;
+      accumBits -= 6;
+    }
+  }
+
+  if (accumBits == 2)
+  {
+    UD_ERROR_IF(outputIndex >= strLength + 3, udR_BufferTooSmall);
+    pString[outputIndex] = b64[(accum & 0x3) << 4];
+    pString[outputIndex+1] = '='; //Pad chars
+    pString[outputIndex+2] = '=';
+    outputIndex += 3;
+  }
+  else if (accumBits == 4)
+  {
+    UD_ERROR_IF(outputIndex + 2 >= strLength, udR_BufferTooSmall);
+    pString[outputIndex] = b64[(accum & 0xF) << 2];
+    pString[outputIndex+1] = '='; //Pad chars
+    outputIndex += 2;
+  }
+  pString[outputIndex++] = 0; // Null terminate if room in the string
+
+  UD_ERROR_IF(outputIndex != expectedOutputLength, udR_InternalError); // Okay, the horse may have bolted at this point.
+
+  result = udR_Success;
+
+epilogue:
+  if (pOutputLengthWritten)
+    *pOutputLengthWritten = outputIndex;
+
+  return result;
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, May 2017
+udResult udBase64Encode(const char **ppDestStr, const void *pBinary, size_t binaryLength)
+{
+  udResult result;
+  size_t expectedOutputLength = (binaryLength + 2) / 3 * 4 + 1; // +1 for nul terminator
+  char *pStr = nullptr;
+
+  UD_ERROR_NULL(ppDestStr, udR_InvalidParameter_);
+  pStr = udAllocType(char, expectedOutputLength, udAF_None);
+  UD_ERROR_NULL(pStr, udR_MemoryAllocationFailure);
+  result = udBase64Encode(pBinary, binaryLength, pStr, expectedOutputLength);
+  UD_ERROR_HANDLE();
+  *ppDestStr = pStr;
+  pStr = nullptr;
+  result = udR_Success;
+
+epilogue:
+  udFree(pStr);
+  return result;
+}
+
+// *********************************************************************
+int udGetHardwareThreadCount()
+{
+#if UDPLATFORM_WINDOWS
+  DWORD_PTR processMask;
+  DWORD_PTR systemMask;
+
+  if (::GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask))
+  {
+    int hardwareThreadCount = 0;
+    while (processMask)
+    {
+      ++hardwareThreadCount;
+      processMask &= processMask - 1; // Clear LSB
+    }
+    return hardwareThreadCount;
+  }
+
+  return 1;
+#else
+  return sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+}
+
+// *********************************************************************
+bool udFilename::SetFromFullPath(const char *pFormat, ...)
+{
+  *path = 0;
+  filenameIndex = 0;
+  extensionIndex = 0;
+  if (pFormat)
+  {
+    va_list args;
+    va_start(args, pFormat);
+    int len = udSprintfVA(path, pFormat, args);
+    va_end(args);
+    CalculateIndices();
+    if (len > (int)sizeof(path))
+      return false;
+  }
+  return true;
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+bool udFilename::SetFolder(const char *pFolder)
+{
+  char newPath[MaxPath];
+  size_t i = udStrcpy(newPath, pFolder);
+  if (!i)
+    return false;
+
+  // If the path doesn't have a trailing seperator, look for one so we can
+  // append one already being used. That is c:\path\ or c:/path/
+  if (i > 2 && newPath[i-2] != '/' && newPath[i-2] != '\\' && newPath[i-2] != ':')
+  {
+    for (--i; i > 0; --i)
+    {
+      if (newPath[i-1] == '\\' || newPath[i-1] == ':')
+      {
+        udStrcat(newPath, "\\");
+        break;
+      }
+      if (newPath[i-1] == '/')
+      {
+        udStrcat(newPath, "/");
+        break;
+      }
+    }
+    // Nothing was found so add a /. TODO: Get correct separator from system
+    if (i == 0)
+      udStrcat(newPath, "/");
+  }
+
+  if (!udStrcat(newPath, GetFilenameWithExt()))
+    return false;
+  return SetFromFullPath(newPath);
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+bool udFilename::SetFilenameNoExt(const char *pFilenameOnlyComponent)
+{
+  char newPath[MaxPath];
+
+  ExtractFolder(newPath, sizeof(newPath));
+  if (!udStrcat(newPath, pFilenameOnlyComponent))
+    return false;
+  if (!udStrcat(newPath, GetExt()))
+    return false;
+  return SetFromFullPath(newPath);
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+bool udFilename::SetFilenameWithExt(const char *pFilenameWithExtension)
+{
+  char newPath[MaxPath];
+
+  ExtractFolder(newPath, sizeof(newPath));
+  if (!udStrcat(newPath, pFilenameWithExtension))
+    return false;
+  return SetFromFullPath(newPath);
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+bool udFilename::SetExtension(const char *pExtComponent)
+{
+  char newPath[MaxPath];
+
+  if (!udStrcpy(newPath, path))
+    return false;
+  newPath[extensionIndex] = 0; // Truncate the extension
+  if (!udStrcat(newPath, pExtComponent))
+    return false;
+  return SetFromFullPath(newPath);
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+int udFilename::ExtractFolder(char *pFolder, int folderLen)
+{
+  int folderChars = filenameIndex;
+  if (pFolder)
+    udStrncpy(pFolder, folderLen, path, folderChars);
+  return folderChars + 1;
+}
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+int udFilename::ExtractFilenameOnly(char *pFilename, int filenameLen)
+{
+  int filenameChars = extensionIndex - filenameIndex;
+  if (pFilename)
+  {
+    udStrncpy(pFilename, filenameLen, path + filenameIndex, filenameChars);
+  }
+  return filenameChars + 1;
+}
+
+// ---------------------------------------------------------------------
+// Author: Dave Pevreal, March 2014
+void udFilename::CalculateIndices()
+{
+  int len = (int)strlen(path);
+  // Set filename and extension indices to null terminator as a sentinal
+  filenameIndex = -1;
+  extensionIndex = len; // If no extension, point extension to nul terminator
+
+  for (--len; len >= 0 && (filenameIndex == -1 || extensionIndex == -1); --len)
+  {
+    if (path[extensionIndex] == 0 && path[len] == '.') // Last period
+      extensionIndex = len;
+    if (filenameIndex == -1 && (path[len] == '/' || path[len] == '\\' || path[len] == ':'))
+      filenameIndex = len + 1;
+  }
+  // If no path indicators were found the filename is the beginning of the path
+  if (filenameIndex == -1)
+    filenameIndex = 0;
+}
+
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+void udFilename::Debug()
+{
+  char folder[260];
+  char name[50];
+
+  ExtractFolder(folder, sizeof(folder));
+  ExtractFilenameOnly(name, sizeof(name));
+  udDebugPrintf("folder<%s> name<%s> ext<%s> filename<%s> -> %s\n", folder, name, GetExt(), GetFilenameWithExt(), path);
+}
+
+
+// *********************************************************************
+// Author: Dave Pevreal, March 2014
+udResult udURL::SetURL(const char *pURL)
+{
+  udFree(pURLText);
+  pScheme = s_udStrEmptyString;
+  pDomain = s_udStrEmptyString;
+  pPath = s_udStrEmptyString;
+  static const char specialChars[]   = { ' ',  '#',   '%',   '+',   '?',   '\0', }; // Made for extending later, not wanting to encode any more than we need to
+  static const char *pSpecialSubs[] = { "%20", "%23", "%25", "%2B", "%3F", "", };
+
+  if (pURL)
+  {
+    // Take a copy of the entire string
+    char *p = pURLText = udStrdup(pURL, udStrlen(pURL) * 3 + 2); // Add an extra chars for nul terminate domain, and URL encoding switches for every character (worst case)
+    if (!pURLText)
+      return udR_MemoryAllocationFailure;
+
+    size_t i, charListIndex;
+
+    // Isolate the scheme
+    udStrchr(p, ":/", &i); // Find the colon that breaks the scheme, but don't search past a slash
+
+    if (p[i] == ':') // Test in case of malformed url (potentially allowing a default scheme such as 'http'
+    {
+      pScheme = p;
+      p[i] = 0; // null terminate the scheme
+      p = p + i + 1;
+      // Skip over the // at start of domain (if present)
+      if (p[0] == '/' && p[1] == '/')
+        p += 2;
+    }
+
+    // Isolate the domain - this is slightly painful because ipv6 has colons
+    pDomain = p;
+    udStrchr(p, p[0] == '[' ? "/]" : "/:", &i); // Find the character that breaks the domain, but don't search past a slash
+    if (p[0] == '[' && p[i] == ']') ++i; // Skip over closing bracket of ipv6 address
+    if (p[i] == ':')
+    {
+      // A colon is present, so decode the port number
+      int portChars;
+      port = udStrAtoi(&p[i+1], &portChars);
+      p[i] = 0; // null terminate the domain
+      i += portChars + 1;
+    }
+    else
+    {
+      // Otherwise assume port 443 for https, or 80 for anything else (should be http)
+      port = udStrEqual(pScheme, "https") ? 443 : 80;
+      // Because no colon character exists to terminate the domain, move it forward by 1 byte
+      if (p[i] != 0)
+      {
+        memmove(p + i + 1, p + i, udStrlen(p + i) + 1); // Move the string one to the right to retain the separator (note: 1 byte was added to allocation when udStrdup called)
+        p[i++] = 0; // null terminate the domain
+      }
+    }
+    p += i;
+
+    // Finally, the path is the last component (for now, unless the class is extended to support splitting the query string too)
+    pPath = p;
+
+    // Now, find any "special" URL characters in the path and encode them
+    while ((p = (char*)udStrchr(p, specialChars, nullptr, &charListIndex)) != nullptr)
+    {
+      size_t len = udStrlen(pSpecialSubs[charListIndex]);
+      memmove(p + len - 1, p, udStrlen(p) + 1);
+      memcpy(p, pSpecialSubs[charListIndex], len);
+      p += len;
+    }
+  }
+
+  return udR_Success; // TODO: Perhaps return an error if the url isn't formed properly
+}
+
+
+#pragma pack(push)
+#pragma pack(2)
+struct udBMPHeader
+{
+    uint16_t  bfType;            // must be 'BM'
+    uint32_t  bfSize;            // size of the whole .bmp file
+    uint16_t  bfReserved1;       // must be 0
+    uint16_t  bfReserved2;       // must be 0
+    uint32_t  bfOffBits;
+
+    uint32_t  biSize;            // size of the structure
+    int32_t   biWidth;           // image width
+    int32_t   biHeight;          // image height
+    uint16_t  biPlanes;          // bitplanes
+    uint16_t  biBitCount;        // resolution
+    uint32_t  biCompression;     // compression
+    uint32_t  biSizeImage;       // size of the image
+    int32_t   biXPelsPerMeter;   // pixels per meter X
+    int32_t   biYPelsPerMeter;   // pixels per meter Y
+    uint32_t  biClrUsed;         // colors used
+    uint32_t  biClrImportant;    // important colors
+};
+#pragma pack(pop)
+
+// ***************************************************************************************
+// Author: Dave Pevreal, August 2014
+udResult udSaveBMP(const char *pFilename, int width, int height, uint32_t *pColorData, int pitchInBytes)
+{
+  udBMPHeader header;
+  memset(&header, 0, sizeof(header));
+  if (!pitchInBytes)
+    pitchInBytes = width * 4;
+
+  udFile *pFile = nullptr;
+  int paddedLineSize = (width * 3 + 3) & ~3;
+  udResult result = udR_MemoryAllocationFailure;
+  uint8_t *pLine = udAllocType(uint8_t, paddedLineSize, udAF_Zero);
+  if (!pLine)
+    goto error;
+
+  header.bfType = 0x4d42;       // 0x4d42 = 'BM'
+  header.bfReserved1 = 0;
+  header.bfReserved2 = 0;
+  header.bfSize = sizeof(header) + paddedLineSize * height;
+  header.bfOffBits = 0x36;
+  header.biSize = 0x28; // sizeof(BITMAPINFOHEADER);
+  header.biWidth = width;
+  header.biHeight = height;
+  header.biPlanes = 1;
+  header.biBitCount = 24;
+  header.biCompression = 0; /*BI_RGB*/
+  header.biSizeImage = 0;
+  header.biXPelsPerMeter = 0x0ec4;
+  header.biYPelsPerMeter = 0x0ec4;
+  header.biClrUsed = 0;
+  header.biClrImportant = 0;
+
+  result = udFile_Open(&pFile, pFilename, udFOF_Write | udFOF_Create);
+  if (result != udR_Success)
+    goto error;
+
+  result = udFile_Write(pFile, &header, sizeof(header));
+  if (result != udR_Success)
+    goto error;
+
+  for (int y = height - 1; y >= 0 ; --y)
+  {
+    for (int x = 0; x < width; ++x)
+      memcpy(&pLine[x*3], &((uint8_t*)pColorData)[y * pitchInBytes + x * 4], 3);
+
+    result = udFile_Write(pFile, pLine, paddedLineSize);
+    if (result != udR_Success)
+      goto error;
+  }
+
+error:
+  udFree(pLine);
+  udFile_Close(&pFile);
+  return result;
+}
+
+// ***************************************************************************************
+// Author: Dave Pevreal, August 2014
+udResult udLoadBMP(const char *pFilename, int *pWidth, int *pHeight, uint32_t **ppColorData)
+{
+  udResult result;
+  udBMPHeader header;
+  memset(&header, 0, sizeof(header));
+  udFile *pFile = nullptr;
+  uint8_t *pColors = nullptr;
+  uint8_t *pLine = nullptr;
+  int paddedLineSize;
+
+  UD_ERROR_NULL(pFilename, udR_InvalidParameter_);
+  UD_ERROR_NULL(ppColorData, udR_InvalidParameter_);
+  UD_ERROR_IF(!pWidth || !pHeight, udR_InvalidParameter_);
+
+  UD_ERROR_CHECK(udFile_Open(&pFile, pFilename, udFOF_Read));
+  UD_ERROR_CHECK(udFile_Read(pFile, &header, sizeof(header)));
+
+  *pWidth = header.biWidth;
+  *pHeight = header.biHeight;
+  paddedLineSize = (*pWidth * 3 + 3) & ~3;
+  pColors = udAllocType(uint8_t, *pWidth * *pHeight * 4, udAF_None);
+  UD_ERROR_NULL(pColors, udR_MemoryAllocationFailure);
+  pLine = udAllocType(uint8_t, paddedLineSize, udAF_None);
+  UD_ERROR_NULL(pLine, udR_MemoryAllocationFailure);
+
+  for (int y = *pHeight - 1; y >= 0 ; --y)
+  {
+    UD_ERROR_CHECK(udFile_Read(pFile, pLine, paddedLineSize));
+    uint8_t *p = pColors + y * *pWidth * 4;
+    for (int x = 0; x < *pWidth; ++x)
+    {
+      *p++ = pLine[x * 3 + 0];
+      *p++ = pLine[x * 3 + 1];
+      *p++ = pLine[x * 3 + 2];
+      *p++ = 0xff;
+    }
+  }
+
+  *ppColorData = (uint32_t*)pColors;
+  pColors = nullptr;
+  result = udR_Success;
+
+epilogue:
+  if (pFile)
+    udFile_Close(&pFile);
+  udFree(pLine);
+  udFree(pColors);
+
+  return result;
+}
+
+// ----------------------------------------------------------------------------
+struct udFindDirData : public udFindDir
+{
+#if UDPLATFORM_WINDOWS
+  HANDLE hFind;
+  WIN32_FIND_DATAW findFileData;
+  char utf8Filename[2048];
+
+  void SetMembers()
+  {
+    // Take a copy of the filename after translation from wide-char to utf8
+    udStrcpy(utf8Filename, udOSString(findFileData.cFileName));
+    pFilename = utf8Filename;
+    isDirectory = !!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+  }
+#elif UDPLATFORM_LINUX || UDPLATFORM_OSX || UDPLATFORM_IOS_SIMULATOR || UDPLATFORM_IOS || UDPLATFORM_ANDROID || UDPLATFORM_EMSCRIPTEN
+  DIR *pDir;
+  struct dirent *pDirent;
+
+  void SetMembers()
+  {
+    pFilename = pDirent->d_name;
+    isDirectory = !!(pDirent->d_type & DT_DIR);
+  }
+#elif UDPLATFORM_NACL
+  //Do nothing
+#else
+#error "Unsupported platform"
+#endif
+};
+
+// ****************************************************************************
+// Author: Dave Pevreal, August 2014
+udResult udFileExists(const char *pFilename, int64_t *pFileLengthInBytes, int64_t *pModifiedTime)
+{
+#if UD_32BIT
+# define UD_STAT_STRUCT stat
+# define UD_STAT_FUNC stat
+# define UD_STAT_MODTIME (int64_t)st.st_mtime
+#elif UDPLATFORM_OSX || UDPLATFORM_IOS_SIMULATOR || UDPLATFORM_IOS
+  // Apple made these 64bit and deprecated the 64bit variants
+# define UD_STAT_STRUCT stat
+# define UD_STAT_FUNC stat
+# define UD_STAT_MODTIME (int64_t)st.st_mtime
+#elif UDPLATFORM_WINDOWS
+# define UD_STAT_STRUCT _stat64
+# define UD_STAT_FUNC _wstat64
+# define UD_STAT_MODTIME (int64_t)st.st_mtime
+#elif UDPLATFORM_LINUX
+# define UD_STAT_STRUCT stat64
+# define UD_STAT_FUNC stat64
+# define UD_STAT_MODTIME (int64_t)st.st_mtim.tv_sec
+#elif UDPLATFORM_ANDROID
+# define UD_STAT_STRUCT stat64
+# define UD_STAT_FUNC stat64
+# define UD_STAT_MODTIME (int64_t)st.st_mtime
+#else
+# error "Unsupported Platform"
+#endif
+
+  struct UD_STAT_STRUCT st;
+  memset(&st, 0, sizeof(st));
+  if (UD_STAT_FUNC(udOSString(pFilename), &st) == 0)
+  {
+    if (pFileLengthInBytes)
+      *pFileLengthInBytes = (int64_t)st.st_size;
+
+    if (pModifiedTime)
+      *pModifiedTime = UD_STAT_MODTIME;
+
+    return udR_Success;
+  }
+  else
+  {
+    return udR_ObjectNotFound;
+  }
+
+#undef UD_STAT_STRUCT
+#undef UD_STAT_FUNC
+}
+
+// ****************************************************************************
+// Author: Dave Pevreal, August 2014
+udResult udFileDelete(const char *pFilename)
+{
+  return remove(pFilename) == -1 ? udR_Failure_ : udR_Success;
+}
+
+// ****************************************************************************
+// Author: Dave Pevreal, August 2014
+udResult udOpenDir(udFindDir **ppFindDir, const char *pFolder)
+{
+  udResult result;
+  udFindDirData *pFindData = nullptr;
+
+  pFindData = udAllocType(udFindDirData, 1, udAF_Zero);
+  UD_ERROR_NULL(pFindData, udR_MemoryAllocationFailure);
+
+#if UDPLATFORM_WINDOWS
+  {
+    udFilename fn;
+    fn.SetFolder(pFolder);
+    fn.SetFilenameWithExt("*.*");
+    pFindData->hFind = FindFirstFileW(udOSString(fn.GetPath()), &pFindData->findFileData);
+    if (pFindData->hFind == INVALID_HANDLE_VALUE)
+      UD_ERROR_SET_NO_BREAK(udR_OpenFailure);
+    pFindData->SetMembers();
+  }
+#elif UDPLATFORM_LINUX || UDPLATFORM_OSX || UDPLATFORM_IOS_SIMULATOR || UDPLATFORM_IOS || UDPLATFORM_ANDROID || UDPLATFORM_EMSCRIPTEN
+  pFindData->pDir = opendir(pFolder);
+  UD_ERROR_NULL(pFindData->pDir, udR_OpenFailure);
+  pFindData->pDirent = readdir(pFindData->pDir);
+  UD_ERROR_NULL(pFindData->pDirent, udR_ObjectNotFound);
+  pFindData->SetMembers();
+#elif UDPLATFORM_NACL
+  // TODO: See if this implementation is required
+  UD_ERROR_SET(udR_ObjectNotFound);
+#else
+  #error "Unsupported Platform"
+#endif
+
+  result = udR_Success;
+  *ppFindDir = pFindData;
+  pFindData = nullptr;
+
+epilogue:
+  if (pFindData)
+    udCloseDir((udFindDir**)&pFindData);
+
+  return result;
+}
+
+// ****************************************************************************
+// Author: Dave Pevreal, August 2014
+udResult udReadDir(udFindDir *pFindDir)
+{
+  if (!pFindDir)
+    return udR_InvalidParameter_;
+
+#if UDPLATFORM_WINDOWS
+  udFindDirData *pFindData = static_cast<udFindDirData *>(pFindDir);
+  if (!FindNextFileW(pFindData->hFind, &pFindData->findFileData))
+    return udR_ObjectNotFound;
+  pFindData->SetMembers();
+#elif UDPLATFORM_LINUX || UDPLATFORM_OSX || UDPLATFORM_IOS_SIMULATOR || UDPLATFORM_IOS || UDPLATFORM_ANDROID || UDPLATFORM_EMSCRIPTEN
+  udFindDirData *pFindData = static_cast<udFindDirData *>(pFindDir);
+  pFindData->pDirent = readdir(pFindData->pDir);
+  if (!pFindData->pDirent)
+    return udR_ObjectNotFound;
+  pFindData->SetMembers();
+#elif UDPLATFORM_NACL
+  // Do nothing
+#else
+  #error "Unsupported Platform"
+#endif
+  return udR_Success;
+}
+
+// ****************************************************************************
+// Author: Dave Pevreal, August 2014
+udResult udCloseDir(udFindDir **ppFindDir)
+{
+  if (!ppFindDir || !*ppFindDir)
+    return udR_InvalidParameter_;
+
+#if UDPLATFORM_WINDOWS
+  udFindDirData *pFindData = static_cast<udFindDirData *>(*ppFindDir);
+  if (pFindData->hFind != INVALID_HANDLE_VALUE)
+    FindClose(pFindData->hFind);
+#elif UDPLATFORM_LINUX || UDPLATFORM_OSX || UDPLATFORM_IOS_SIMULATOR || UDPLATFORM_IOS || UDPLATFORM_ANDROID || UDPLATFORM_EMSCRIPTEN
+  udFindDirData *pFindData = static_cast<udFindDirData *>(*ppFindDir);
+  if (pFindData->pDir)
+    closedir(pFindData->pDir);
+#elif UDPLATFORM_NACL
+  // Do nothing
+#else
+  #error "Unsupported Platform"
+#endif
+
+  udFree(*ppFindDir);
+  return udR_Success;
+}
+
+// ****************************************************************************
+// Author: Samuel Surtees, May 2016
+udResult udCreateDir(const char *pFolder)
+{
+  udResult ret = udR_Success;
+
+  // TODO: Handle creating intermediate directories that don't exist already?
+  // TODO: Have udFile_Open call this for the user when udFOF_Create is used?
+#if UDPLATFORM_WINDOWS
+  // Returns 0 on fail
+  if (CreateDirectoryW(udOSString(pFolder), NULL) == 0)
+#else
+  // Returns -1 on fail
+  if (mkdir(pFolder, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) == -1)
+#endif
+    ret = udR_Failure_;
+
+  return ret;
+}
+
+// ****************************************************************************
+// Author: Dave Pevreal, August 2018
+udResult udRemoveDir(const char *pFolder)
+{
+#if UDPLATFORM_WINDOWS
+  // Returns 0 on fail
+  if (RemoveDirectoryW(udOSString(pFolder)) == 0)
+    return udR_Failure_;
+#else
+  // Returns -1 on fail
+  if (rmdir(pFolder) != 0)
+    return udR_Failure_;
+#endif
+
+  return udR_Success;
+}
+
+// ****************************************************************************
+// Author: Dave Pevreal, May 2018
+udResult udParseWKT(udJSON *pValue, const char *pString, int *pCharCount)
+{
+  udResult result = udR_Success;;
+  size_t idLen;
+  udJSON temp;
+  int tempCharCount = 0;
+  int parameterNumber = 0;
+  const char *pStartString = pString;
+
+  UD_ERROR_NULL(pValue, udR_InvalidParameter_);
+  UD_ERROR_NULL(pString, udR_InvalidParameter_);
+
+  pString = udStrSkipWhiteSpace(pString);
+  while (*pString && *pString != ']')
+  {
+    g_udBreakOnError = false;
+    udResult parseResult = temp.Parse(pString, &tempCharCount);
+    g_udBreakOnError = true;
+    if (parseResult == udR_Success)
+    {
+      if (!parameterNumber && temp.IsString())
+        pValue->Set(&temp, "name");
+      else
+        pValue->Set(&temp, "values[]");
+      ++parameterNumber;
+      pString += tempCharCount;
+    }
+    else
+    {
+      // Assume an object identifier, or an unquoted constant
+      udStrchr(pString, "[],", &idLen);
+      if (pString[idLen] == '[')
+      {
+        temp.Set("type = '%.*s'", (int)idLen, pString);
+        result = udParseWKT(&temp, pString + idLen + 1, &tempCharCount);
+        UD_ERROR_HANDLE();
+        pValue->Set(&temp, "values[]");
+        pString += idLen + 1 + tempCharCount;
+      }
+      else // Any non-parsable is now considered a string, eg AXIS["Easting",EAST] parses as AXIS["Easting","EAST"]
+      {
+        pValue->Set("values[] = '%.*s'", (int)idLen, pString);
+        ++parameterNumber;
+        pString += idLen;
+      }
+    }
+    if (*pString == ',')
+      ++pString;
+    pString = udStrSkipWhiteSpace(pString);
+  }
+  if (*pString == ']')
+    ++pString;
+  if (pCharCount)
+    *pCharCount = int(pString - pStartString);
+
+epilogue:
+  return result;
+}
+
+
+// ----------------------------------------------------------------------------
+// Author: Dave Pevreal, May 2018
+static udResult GetWKTElementStr(const char **ppOutput, const udJSON &value)
+{
+  udResult result;
+  const char *pElementSeperator = ""; // Changed to "," after first element is written
+  const char *pStr = nullptr;
+  const char *pElementStr = nullptr;
+  const char *pTypeStr;
+  const char *pNameStr;
+  size_t valuesCount;
+
+  pTypeStr = value.Get("type").AsString();
+  UD_ERROR_NULL(pTypeStr, udR_ParseError);
+  pNameStr = value.Get("name").AsString();
+  valuesCount = value.Get("values").ArrayLength();
+  UD_ERROR_CHECK(udSprintf(&pStr, "%s[", pTypeStr));
+  if (pNameStr)
+  {
+    UD_ERROR_CHECK(udSprintf(&pStr, "%s\"%s\"", pStr, pNameStr));
+    pElementSeperator = ",";
+  }
+  for (size_t i = 0; i < valuesCount; ++i)
+  {
+    const udJSON &arrayValue = value.Get("values[%d]", (int)i);
+    if (arrayValue.IsObject())
+      UD_ERROR_CHECK(GetWKTElementStr(&pElementStr, arrayValue));
+    else if (arrayValue.IsString() && i == 0 && udStrEqual(pTypeStr, "AXIS")) // Special case for AXIS, output second string unquoted
+      UD_ERROR_CHECK(udSprintf(&pElementStr, "%s", arrayValue.AsString()));
+    else if (arrayValue.IsString())
+      UD_ERROR_CHECK(udSprintf(&pElementStr, "\"%s\"", arrayValue.AsString()));
+    else
+      UD_ERROR_CHECK(arrayValue.ToString(&pElementStr));
+    UD_ERROR_CHECK(udSprintf(&pStr, "%s%s%s", pStr, pElementSeperator, pElementStr));
+    udFree(pElementStr);
+    pElementSeperator = ",";
+  }
+  // Put the closing brace on
+  UD_ERROR_CHECK(udSprintf(&pStr, "%s]", pStr));
+
+  // Transfer ownership
+  *ppOutput = pStr;
+  pStr = nullptr;
+  result = udR_Success;
+
+epilogue:
+  udFree(pStr);
+  udFree(pElementStr);
+  return result;
+}
+
+// ****************************************************************************
+// Author: Dave Pevreal, May 2018
+udResult udExportWKT(const char **ppOutput, const udJSON *pValue)
+{
+  udResult result;
+  const char *pStr = nullptr;
+  const char *pElementStr = nullptr;
+  const char *pTemp = nullptr;
+  size_t elemCount;
+
+  UD_ERROR_NULL(ppOutput, udR_InvalidParameter_);
+  UD_ERROR_NULL(pValue, udR_InvalidParameter_);
+
+  elemCount = pValue->Get("values").ArrayLength();
+  for (size_t i = 0; i < elemCount; ++i)
+  {
+    UD_ERROR_CHECK(GetWKTElementStr(&pElementStr, pValue->Get("values[%d]", (int)i)));
+    if (!pStr)
+    {
+      pStr = pElementStr;
+      pElementStr = nullptr;
+    }
+    else
+    {
+      pTemp = pStr;
+      pStr = nullptr;
+      UD_ERROR_CHECK(udSprintf(&pStr, "%s%s", pTemp, pElementStr));
+    }
+    udFree(pElementStr);
+    udFree(pTemp);
+  }
+  // Transfer ownership
+  *ppOutput = pStr;
+  pStr = nullptr;
+  result = udR_Success;
+
+epilogue:
+  udFree(pStr);
+  udFree(pElementStr);
+  udFree(pTemp);
+  return result;
+}
